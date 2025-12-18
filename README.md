@@ -107,6 +107,80 @@ src/
                      指數變數 (13)            相對強度 (26)
 ```
 
+### 模組協作流程圖
+
+```mermaid
+flowchart TD
+    subgraph 資料層
+        DL[DataLoader] --> FC[FeatureCalculator]
+        FC --> DN[DataNormalizer]
+    end
+    
+    subgraph RL層
+        DN --> BE[BuyEnv]
+        DN --> SE[SellEnv]
+        BE <--> BA[BuyAgent]
+        SE <--> SA[SellAgent]
+    end
+    
+    subgraph 規則層
+        SL[StopLossRule]
+        DC[DonchianChannel]
+    end
+    
+    subgraph 交易層
+        BA --> SO[StrategyOrchestrator]
+        SA --> SO
+        SL --> SO
+        DC --> SO
+        SO --> PM[PortfolioManager]
+        PM --> TE[TradeExecutor]
+    end
+    
+    subgraph 評估層
+        TE --> BT[BacktestEngine]
+        BT --> PE[PerformanceEvaluator]
+        PE --> VZ[Visualizer]
+    end
+```
+
+### 開發時程
+
+```mermaid
+gantt
+    title Pro Trader RL 開發時程
+    dateFormat  YYYY-MM-DD
+    
+    section 第一階段: 資料模組
+    DataLoader              :done, a1, 2024-01-01, 3d
+    FeatureCalculator       :done, a2, after a1, 5d
+    DataNormalizer          :done, a3, after a2, 3d
+    
+    section 第二階段: 規則與環境
+    DonchianChannel         :done, b1, after a3, 2d
+    StopLossRule            :done, b2, after b1, 2d
+    BuyEnv                  :done, b3, after a3, 4d
+    SellEnv                 :done, b4, after b3, 4d
+    
+    section 第三階段: Agent
+    BuyAgent                :done, c1, after b3, 4d
+    SellAgent               :done, c2, after b4, 4d
+    
+    section 第四階段: 交易系統
+    PortfolioManager        :done, d1, after c2, 3d
+    TradeExecutor           :done, d2, after d1, 2d
+    StrategyOrchestrator    :done, d3, after d2, 3d
+    
+    section 第五階段: 回測與評估
+    BacktestEngine          :done, e1, after d3, 4d
+    PerformanceEvaluator    :done, e2, after e1, 2d
+    Visualizer              :done, e3, after e2, 2d
+    
+    section 第六階段: 腳本與測試
+    每日營運腳本            :done, f1, after e3, 2d
+    測試套件                :done, f2, after f1, 3d
+```
+
 ---
 
 ## 目錄結構
@@ -987,18 +1061,48 @@ python -m pytest tests/test_paper_verification.py -v
 
 訓練過程可透過 TensorBoard 即時監控。
 
+### 啟動方式
+
 ```bash
+# 監控所有訓練
 tensorboard --logdir=logs/training/
 
-# 瀏覽器訪問 http://localhost:6006
+# 只監控 Buy Agent
+tensorboard --logdir=logs/training/buy_agent/
+
+# 只監控 Sell Agent
+tensorboard --logdir=logs/training/sell_agent/
+
+# 指定 port
+tensorboard --logdir=logs/training/ --port=6006
 ```
 
-**監控指標**:
-- Episode Reward (訓練獎勵)
-- Policy Loss (策略損失)
-- Value Loss (價值損失)
-- Explained Variance (解釋變異)
-- Entropy (熵值)
+> **提示**: 訓練期間開啟瀏覽器訪問 `http://localhost:6006` 即可即時查看訓練曲線
+
+### 監控指標
+
+| 指標 | 說明 |
+|------|------|
+| `rollout/ep_rew_mean` | 平均 Episode 獎勵 |
+| `rollout/ep_len_mean` | 平均 Episode 長度 |
+| `train/loss` | 訓練損失 |
+| `train/policy_loss` | 策略損失 |
+| `train/value_loss` | 價值函數損失 |
+| `train/entropy_loss` | 熵損失 |
+| `train/approx_kl` | 近似 KL 散度 |
+| `eval/mean_reward` | 評估平均獎勵 (用於選擇最佳模型) |
+
+### 日誌目錄結構
+
+```
+logs/training/
+├── buy_agent/
+│   ├── PPO_1/
+│   │   └── events.out.tfevents.xxx
+│   └── PPO_2/  (接續訓練會建立新目錄)
+└── sell_agent/
+    └── PPO_1/
+```
 
 ---
 
