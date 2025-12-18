@@ -1,0 +1,50 @@
+# Pro Trader RL - Python Dependencies
+# 與全域環境一致的版本號
+
+# === 核心套件 ===
+numpy==2.2.6
+pandas==2.3.3
+scipy==1.15.3
+
+# === 資料下載 ===
+yfinance==0.2.66
+requests==2.32.5
+
+# === 機器學習 / 深度學習 ===
+torch==2.7.1
+stable-baselines3==2.7.1
+gymnasium==1.2.2
+
+# === 技術指標計算 ===
+ta==0.11.0
+pandas-ta-openbb==0.4.22
+
+# === 設定檔 ===
+pyyaml==6.0.3
+python-dotenv==1.2.1
+
+# === 視覺化 ===
+matplotlib==3.10.8
+seaborn==0.13.2
+plotly==6.5.0
+
+# === 進度條 ===
+tqdm==4.67.1
+
+# === TensorBoard ===
+tensorboard==2.20.0
+
+# === 測試 ===
+pytest==9.0.1
+pytest-cov==7.0.0
+
+# === 資料驗證 ===
+pydantic==2.11.5
+
+# === 日誌 ===
+loguru==0.7.3
+
+# === 其他相依套件 (自動安裝) ===
+# scikit-learn==1.7.2
+# beautifulsoup4==4.14.3
+# joblib==1.5.2

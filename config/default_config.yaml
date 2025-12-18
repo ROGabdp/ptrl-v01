@@ -1,0 +1,143 @@
+# Pro Trader RL - 預設設定檔
+# 根據論文 "Pro Trader RL: Reinforcement learning framework for generating trading knowledge"
+
+# === 資料設定 ===
+data:
+  data_dir: "data/raw/"
+  processed_dir: "data/processed/"
+  cache_dir: "data/cache/"
+  symbols_file: "config/sp500_symbols.txt"
+  start_date: "2005-02-25"
+  end_date: "2023-10-15"
+  index_symbol: "^GSPC"  # S&P 500 指數 (修正: 論文用 ^DJI)
+
+# === 特徵計算設定 ===
+features:
+  # ATR 設定
+  atr_period: 10
+  
+  # Donchian Channel 設定
+  donchian_period: 20
+  
+  # RSI 設定
+  rsi_period: 14
+  
+  # MFI 設定
+  mfi_period: 14
+  
+  # Super Trend 設定
+  super_trend_periods: [14, 21]
+  super_trend_multipliers: [2, 1]
+  
+  # 相對強度 (RS) 設定
+  rs_periods: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]  # 月
+  rs_rate_periods: [5, 10, 20, 40]  # 日
+
+# === Buy Agent 設定 ===
+buy_agent:
+  # 獎勵閾值
+  success_threshold: 0.10  # 報酬率 >= 10% 視為成功
+  
+  # PPO 超參數 (論文 Table 6)
+  algorithm: "PPO"
+  learning_rate: 0.0001
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  
+  # 神經網路架構 (論文: 69 -> 40 -> 2)
+  policy_kwargs:
+    net_arch:
+      pi: [69, 40]  # Actor
+      vf: [69, 40]  # Critic
+  
+  # 訓練設定
+  total_timesteps: 1000000
+  checkpoint_freq: 10000
+  eval_freq: 5000
+  n_eval_episodes: 10
+  early_stop_patience: 50
+  
+  # 訓練資料平衡 (論文要求 1:1)
+  balance_training_data: true
+
+# === Sell Agent 設定 ===
+sell_agent:
+  # 獎勵閾值
+  success_threshold: 0.10
+  
+  # 賣出判斷閾值 (論文: sell_prob - hold_prob > 0.85)
+  sell_threshold: 0.85
+  
+  # 最大持有天數
+  max_holding_days: 120
+  
+  # PPO 超參數
+  algorithm: "PPO"
+  learning_rate: 0.0001
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  
+  # 神經網路架構 (論文: 70 -> 40 -> 2, 多一個 SellReturn)
+  policy_kwargs:
+    net_arch:
+      pi: [70, 40]
+      vf: [70, 40]
+  
+  # 訓練設定
+  total_timesteps: 1000000
+  checkpoint_freq: 10000
+  eval_freq: 5000
+  n_eval_episodes: 10
+  early_stop_patience: 50
+
+# === 停損規則設定 ===
+stop_loss:
+  # 跌幅停損 (Stop Loss on Dips)
+  dip_threshold: -0.10  # 報酬率 < -10% 觸發
+  
+  # 盤整停損 (Stop Loss on Sideways)
+  sideways_days: 20      # 連續 N 天
+  sideways_threshold: 0.10  # 報酬率 <= 10%
+  max_holding_days: 120
+
+# === 投資組合設定 ===
+portfolio:
+  initial_capital: 10000
+  max_positions: 10          # 最多持有 10 檔
+  max_position_pct: 0.10     # 單檔最多 10%
+  trading_fee: 0.001         # 手續費 0.1%
+
+# === 訓練設定 ===
+training:
+  checkpoint_dir: "models/checkpoints/"
+  best_model_dir: "models/"
+  tensorboard_log: "logs/training/"
+  verbose: 1
+  use_early_stopping: true
+  device: "auto"  # auto, cpu, cuda
+
+# === 回測設定 ===
+backtest:
+  start_date: "2017-10-16"
+  end_date: "2023-10-15"
+  train_end_date: "2017-10-15"
+
+# === 日誌設定 ===
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  log_dir: "logs/"
