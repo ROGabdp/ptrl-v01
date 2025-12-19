@@ -25,7 +25,7 @@ from stable_baselines3.common.callbacks import (
     EvalCallback,
     CallbackList
 )
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import VecEnv, DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.monitor import Monitor
 from loguru import logger
 
@@ -167,16 +167,25 @@ class BuyAgent:
         if not isinstance(env, DummyVecEnv):
             env = DummyVecEnv([lambda: Monitor(env)])
         
+        resumed_steps = 0
+        
         # 檢查是否恢復訓練
         if resume:
             checkpoint_path = self.get_latest_checkpoint()
             if checkpoint_path:
                 logger.info(f"從檢查點恢復訓練: {checkpoint_path}")
-                self.model = PPO.load(
-                    checkpoint_path, 
-                    env=env,
-                    tensorboard_log=self.tensorboard_log
-                )
+                # 注意: 不要傳入 tensorboard_log，讓它使用 checkpoint 中保存的設定
+                self.model = PPO.load(checkpoint_path, env=env)
+                # 設定 tensorboard log 路徑
+                self.model.tensorboard_log = self.tensorboard_log
+                resumed_steps = self.model.num_timesteps
+                logger.info(f"從第 {resumed_steps:,} 步繼續訓練，目標 {total_timesteps:,} 步")
+                
+                # 計算剩餘需要訓練的步數
+                remaining_steps = max(0, total_timesteps - resumed_steps)
+                if remaining_steps == 0:
+                    logger.info("已達到目標步數，無需繼續訓練")
+                    return
             else:
                 logger.warning("找不到檢查點，從頭開始訓練")
                 resume = False
@@ -205,19 +214,29 @@ class BuyAgent:
         callbacks = self._create_callbacks(eval_env)
         
         # 開始訓練
-        logger.info(f"開始訓練 BuyAgent - 總步數: {total_timesteps}")
+        if resume and resumed_steps > 0:
+            # Resume 時：只訓練剩餘的步數，讓總步數達到目標
+            remaining = total_timesteps - resumed_steps
+            logger.info(f"繼續訓練 BuyAgent - 剩餘 {remaining:,} 步 (已完成 {resumed_steps:,}，目標 {total_timesteps:,})")
+            train_steps = remaining
+        else:
+            logger.info(f"開始訓練 BuyAgent - 總步數: {total_timesteps:,}")
+            train_steps = total_timesteps
         logger.info(f"TensorBoard 指令: tensorboard --logdir={self.tensorboard_log}")
         
         self.model.learn(
-            total_timesteps=total_timesteps,
+            total_timesteps=train_steps,  # 使用剩餘步數而非總步數
             callback=callbacks,
-            reset_num_timesteps=not resume
+            reset_num_timesteps=False,  # 永遠不重置，保持累積計數
+            tb_log_name="PPO"  # 使用固定名稱，避免每次創建新的 run
         )
+
         
         # 儲存最終模型
         final_path = os.path.join(self.best_model_dir, 'final_model.zip')
         self.model.save(final_path)
         logger.info(f"訓練完成，最終模型已儲存至: {final_path}")
+
     
     def _create_callbacks(self, eval_env = None) -> CallbackList:
         """建立訓練 Callbacks"""
@@ -233,14 +252,15 @@ class BuyAgent:
         )
         callbacks.append(checkpoint_callback)
         
-        # 2. 評估 Callback (含最佳模型保存和 Early Stopping)
+        # 2. 評估 Callback (僅用於監控，不儲存 best_model)
+        # 注意: eval_env 使用測試期資料，因此不應用於模型選擇
         if eval_env is not None:
-            if not isinstance(eval_env, DummyVecEnv):
+            if not isinstance(eval_env, VecEnv):
                 eval_env = DummyVecEnv([lambda: Monitor(eval_env)])
             
             eval_callback = EvalCallback(
                 eval_env,
-                best_model_save_path=self.best_model_dir,
+                best_model_save_path=None,  # 不根據 eval 儲存 best model
                 log_path=self.tensorboard_log,
                 eval_freq=self.eval_freq,
                 n_eval_episodes=self.n_eval_episodes,
@@ -248,6 +268,7 @@ class BuyAgent:
                 render=False
             )
             callbacks.append(eval_callback)
+
         
         # 3. 訓練狀態 Callback
         state_callback = TrainingStateCallback(

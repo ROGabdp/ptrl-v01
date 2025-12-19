@@ -58,7 +58,7 @@ buy_agent:
       vf: [69, 40]  # Critic
   
   # 訓練設定
-  total_timesteps: 1000000
+  total_timesteps: 5000000   # 從 2M 延長到 5M
   checkpoint_freq: 10000
   eval_freq: 5000
   n_eval_episodes: 10
@@ -98,7 +98,7 @@ sell_agent:
       vf: [70, 40]
   
   # 訓練設定
-  total_timesteps: 1000000
+  total_timesteps: 5000000   # 從 2M 延長到 5M
   checkpoint_freq: 10000
   eval_freq: 5000
   n_eval_episodes: 10
@@ -128,6 +128,7 @@ training:
   tensorboard_log: "logs/training/"
   verbose: 1
   use_early_stopping: true
+  n_envs: 1          # 設為 1 以確保 Windows 穩定性 (若 RAM 足夠可嘗試增加)
   device: "auto"  # auto, cpu, cuda
 
 # === 回測設定 ===

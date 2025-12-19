@@ -202,11 +202,8 @@ class SellEnv(gym.Env):
         terminated = (action == 1) or force_sell
         truncated = False
         
-        # 計算獎勵
-        if terminated:
-            reward = self._calculate_reward(sell_return, features)
-        else:
-            reward = 0.0  # 持有期間無獎勵
+        # 計算獎勵 (論文 4 情境邏輯)
+        reward = self._calculate_reward_paper(action, current_return, features)
         
         # 移動到下一天
         self.current_day += 1
@@ -247,33 +244,60 @@ class SellEnv(gym.Env):
         
         return obs
     
-    def _calculate_reward(self, sell_return: float, features: pd.DataFrame) -> float:
+    def _calculate_reward_paper(self, action: int, current_return: float, features: pd.DataFrame) -> float:
         """
-        計算獎勵
+        論文定義的 4 情境獎勵函數
         
-        基於論文的相對排名獎勵:
-        - 計算該交易期間所有可能賣出點的報酬率
-        - 根據當前賣出點的排名給予獎勵
-        - 賣在最高點得最高獎勵
+        情境 1: 賣出 (action=1) 且報酬 >= 10% → 排名獎勵 (+1 到 +2)
+        情境 2: 賣出 (action=1) 且報酬 < 10%  → -1 (錯誤賣低)
+        情境 3: 持有 (action=0) 且報酬 < 10%  → +0.5 (正確耐心)
+        情境 4: 持有 (action=0) 且報酬 >= 10% → -1 (錯失良機)
+        """
+        is_profitable = current_return >= self.success_threshold  # 10%
+        
+        if action == 1:  # 賣出動作
+            if is_profitable:
+                # 情境 1: 賣出成功 - 給予排名獎勵
+                return self._calculate_ranking_reward(current_return, features)
+            else:
+                # 情境 2: 賣出失敗 (賣太早/賣虧損) - 懲罰
+                return -1.0
+        else:  # 持有動作 (action == 0)
+            if is_profitable:
+                # 情境 4: 有錢不賺 - 懲罰 (錯過賣點)
+                return -1.0
+            else:
+                # 情境 3: 正確等待 - 小獎勵
+                return 0.5
+    
+    def _calculate_ranking_reward(self, sell_return: float, features: pd.DataFrame) -> float:
+        """
+        計算排名獎勵 (公式 21)
+        
+        在 120 天內所有 >= 10% 的日子中，根據當前賣出點的排名給予獎勵
+        賣在最高點得 +2，賣在最低的 10% 點得 +1
         """
         holding_period = features.iloc[:self.max_holding_days] if len(features) > self.max_holding_days else features
         
         # 計算所有可能的賣出報酬率
         all_returns = (holding_period['Close'] - self.buy_price) / self.buy_price
         
-        if len(all_returns) == 0:
-            return 0.0
+        # 只考慮 >= 10% 的日子
+        profitable_returns = all_returns[all_returns >= self.success_threshold]
         
-        # 計算排名 (0-1)
-        rank = (all_returns <= sell_return).mean()
+        if len(profitable_returns) == 0:
+            return 1.0  # 沒有其他 >= 10% 的日子，給予基本獎勵
         
-        # 轉換為獎勵 (-1 到 +2)
+        # 計算排名 (0-1，1 = 最高)
+        rank = (profitable_returns <= sell_return).mean()
+        
+        # 轉換為獎勵 (+1 到 +2)
         # rank=1 (最高) -> reward=2
-        # rank=0.5 (中間) -> reward=0.5
-        # rank=0 (最低) -> reward=-1
-        reward = 3 * rank - 1
+        # rank=0 (最低) -> reward=1
+        reward = rank + 1.0
         
         return float(reward)
+
     
     def get_state_dim(self) -> int:
         """取得狀態維度 (70)"""

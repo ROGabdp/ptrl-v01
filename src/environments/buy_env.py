@@ -64,9 +64,15 @@ class BuyEnv(gym.Env):
         self.success_threshold = config.get('success_threshold', 0.10)
         self.balance_data = config.get('balance_data', True)
         
+        # 處理標籤: 如果有 'label' 欄位，轉換為 'is_successful'
+        # Label 2 = 成功 (報酬 >= 10%), Label 1 = 失敗
+        if 'label' in signals_data.columns and 'is_successful' not in signals_data.columns:
+            signals_data = signals_data.copy()
+            signals_data['is_successful'] = signals_data['label'] == 2
+        
         # 特徵欄位 (排除 actual_return 和 is_successful)
         self.feature_cols = [col for col in signals_data.columns 
-                             if col not in ['actual_return', 'is_successful', 'Date', 'symbol']]
+                             if col not in ['actual_return', 'is_successful', 'Date', 'symbol', 'label']]
         
         # 儲存原始資料
         self._original_data = signals_data.copy()
