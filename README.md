@@ -326,8 +326,8 @@ python scripts/train.py --sell-only
 ### 2. 執行回測
 
 ```bash
-# 回測 2022-2023 年
-python scripts/backtest.py --start 2022-01-01 --end 2023-12-31
+# 回測 2017-2023 年
+python scripts/backtest.py --start 2017-10-16 --end 2023-10-15
 
 # 指定股票回測
 python scripts/backtest.py --symbols AAPL MSFT GOOGL
