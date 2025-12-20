@@ -322,10 +322,40 @@ class BacktestEngine:
                     continue
             
             # 2. 使用 Sell Agent 決策
-            if self.sell_agent:
-                # 簡化: 這裡應該計算特徵並正規化
-                # 目前使用簡化邏輯
-                should_sell = holding_days > 60 and np.random.random() > 0.8
+            if self.sell_agent and self.sell_agent.model is not None:
+                should_sell = False
+                
+                try:
+                    # 計算 69 維基本特徵
+                    features_69 = self._calculate_stock_features(symbol, df, None, date)
+                    
+                    if features_69 is not None:
+                        # 計算 SellReturn (公式 20: Open_t / BuyPrice)
+                        current_open = df.loc[date, 'Open'] if 'Open' in df.columns else current_price
+                        sell_return = current_open / trade.buy_price
+                        
+                        # 建構 70 維特徵向量
+                        obs_70 = np.concatenate([features_69, [sell_return]]).astype(np.float32)
+                        
+                        # 使用模型預測
+                        if hasattr(self.sell_agent, 'predict_proba'):
+                            # 取得動作機率 [hold_prob, sell_prob]
+                            probs = self.sell_agent.predict_proba(obs_70)
+                            hold_prob, sell_prob = float(probs[0]), float(probs[1])
+                            
+                            # 論文條件: |sell_prob - hold_prob| > 0.85 且 sell_prob > hold_prob
+                            confidence_diff = sell_prob - hold_prob
+                            if confidence_diff > 0.85:
+                                should_sell = True
+                                logger.debug(f"{date.strftime('%Y-%m-%d')} {symbol}: Sell Agent 決定賣出 (conf: {confidence_diff:.2f})")
+                        else:
+                            # Fallback: 直接使用 predict
+                            action, _ = self.sell_agent.model.predict(obs_70.reshape(1, -1), deterministic=True)
+                            should_sell = (action[0] == 1)
+                            
+                except Exception as e:
+                    logger.debug(f"Sell Agent 預測 {symbol} 失敗: {e}")
+                    should_sell = False
                 
                 if should_sell:
                     trade.sell_date = date

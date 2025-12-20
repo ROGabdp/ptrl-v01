@@ -1,0 +1,5 @@
+{
+  "total_timesteps": 12000000,
+  "best_mean_reward": -Infinity,
+  "n_calls": 1870000
+}
