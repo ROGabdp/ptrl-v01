@@ -58,7 +58,7 @@ buy_agent:
       vf: [69, 40]  # Critic
   
   # 訓練設定
-  total_timesteps: 11000000   # 從 6.2M 再練 3小時 (約 +4.8M) -> 11M
+  total_timesteps: 18000000   # 延長至 18M 觀察是否飽和
   checkpoint_freq: 10000
   eval_freq: 5000
   n_eval_episodes: 10
@@ -98,7 +98,7 @@ sell_agent:
       vf: [70, 40]
   
   # 訓練設定
-  total_timesteps: 5000000   # 從 2M 延長到 5M
+  total_timesteps: 15000000   # 延長至 15M 觀察趨勢
   checkpoint_freq: 10000
   eval_freq: 5000
   n_eval_episodes: 10

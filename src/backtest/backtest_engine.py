@@ -220,6 +220,70 @@ class BacktestEngine:
         total_equity = self._calculate_equity(date, all_data)
         self.daily_equity.append((date, total_equity))
     
+    def _calculate_stock_features(self, symbol: str, df: pd.DataFrame, 
+                                   index_data: pd.DataFrame, date: datetime) -> Optional[np.ndarray]:
+        """
+        計算單一股票在指定日期的 69 維正規化特徵
+        
+        Args:
+            symbol: 股票代碼
+            df: 股票日線資料
+            index_data: 指數資料
+            date: 目標日期
+            
+        Returns:
+            69 維正規化特徵向量，若計算失敗則回傳 None
+        """
+        if self.feature_calculator is None or self.normalizer is None:
+            return None
+        
+        try:
+            idx = df.index.get_loc(date)
+            
+            # 需要足夠的歷史資料 (至少 252 天用於滾動計算)
+            if idx < 252:
+                return None
+            
+            # 取得回測日期之前的資料用於特徵計算 (包含當日)
+            stock_slice = df.iloc[:idx+1].copy()
+            
+            # 準備指數資料
+            index_slice = None
+            if index_data is not None and date in index_data.index:
+                index_idx = index_data.index.get_loc(date)
+                if index_idx >= 252:
+                    index_slice = index_data.iloc[:index_idx+1].copy()
+            
+            # 計算特徵
+            features_df = self.feature_calculator.calculate_all_features(
+                stock_slice, index_slice
+            )
+            
+            # 正規化
+            normalized_df = self.normalizer.normalize(features_df)
+            
+            # 取得當日的特徵向量
+            if normalized_df.empty or date not in normalized_df.index:
+                return None
+            
+            # 提取 RL 特徵欄位
+            feature_cols = self.normalizer.get_normalized_feature_columns()
+            available_cols = [col for col in feature_cols if col in normalized_df.columns]
+            
+            if not available_cols:
+                return None
+            
+            feature_vector = normalized_df.loc[date, available_cols].values.astype(np.float32)
+            
+            # 處理 NaN 和 Inf
+            feature_vector = np.nan_to_num(feature_vector, nan=0.0, posinf=1.0, neginf=-1.0)
+            
+            return feature_vector
+            
+        except Exception as e:
+            logger.debug(f"計算 {symbol} 特徵失敗: {e}")
+            return None
+    
     def _process_sell_decisions(self, date: datetime, all_data: Dict):
         """處理賣出決策"""
         positions_to_close = []
@@ -278,14 +342,21 @@ class BacktestEngine:
             self.closed_trades.append(trade)
     
     def _process_buy_decisions(self, date: datetime, all_data: Dict, index_data: pd.DataFrame):
-        """處理買入決策"""
+        """
+        處理買入決策 - 實作 Top-10 選股邏輯
+        
+        論文設計:
+        1. 收集當日所有 Donchian Channel 突破訊號
+        2. 使用 Buy Agent 計算每個訊號的「會漲10%」機率
+        3. 依機率排序，選 Top-10 買入
+        """
         # 檢查是否有空間開新倉
-        if len(self.positions) >= self.max_positions:
+        available_slots = self.max_positions - len(self.positions)
+        if available_slots <= 0:
             return
         
-        # 計算可用資金
-        available_cash = self.cash
-        position_size = available_cash * self.max_position_pct
+        # === 階段 1: 收集所有突破訊號 ===
+        breakout_candidates = []
         
         for symbol, df in all_data.items():
             if symbol in self.positions:
@@ -305,30 +376,73 @@ class BacktestEngine:
             is_breakout = high > donchian_upper
             
             if is_breakout:
-                # 使用 Buy Agent 過濾
-                should_buy = True
-                if self.buy_agent:
-                    # 簡化: 這裡應該計算特徵並正規化
-                    should_buy = np.random.random() > 0.3
+                buy_price = df.loc[date, 'Close']
                 
-                if should_buy and available_cash >= position_size:
-                    buy_price = df.loc[date, 'Close']
-                    shares = int(position_size / buy_price)
-                    
-                    if shares > 0:
-                        trade = Trade(
-                            symbol=symbol,
-                            buy_date=date,
-                            buy_price=buy_price,
-                            shares=shares
-                        )
-                        self.positions[symbol] = trade
-                        buy_cost = buy_price * shares * (1 + self.trading_fee)
-                        self.cash -= buy_cost
-                        available_cash -= buy_cost
+                # === 計算 Buy Agent 信心分數 (使用真實模型預測) ===
+                confidence = 0.5  # 預設值 (無模型時)
+                
+                if self.buy_agent and hasattr(self.buy_agent, 'predict_proba') and self.buy_agent.model is not None:
+                    try:
+                        # 計算該股票的特徵
+                        features = self._calculate_stock_features(symbol, df, index_data, date)
                         
-                        if len(self.positions) >= self.max_positions:
-                            break
+                        if features is not None:
+                            # 呼叫模型取得預測機率
+                            # predict_proba 回傳 [不買機率, 買機率]
+                            probs = self.buy_agent.predict_proba(features)
+                            confidence = float(probs[1])  # 取「買」的機率作為信心分數
+                    except Exception as e:
+                        logger.debug(f"無法計算 {symbol} 信心分數: {e}")
+                        confidence = 0.5
+                
+                breakout_candidates.append({
+                    'symbol': symbol,
+                    'buy_price': buy_price,
+                    'confidence': confidence,
+                    'df': df
+                })
+        
+        # === 階段 2: 依信心分數排序，選 Top-10 ===
+        if not breakout_candidates:
+            return
+        
+        # 排序: 信心分數由高到低
+        breakout_candidates.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        # 限制為 Top-10 (或可用空位數)
+        top_candidates = breakout_candidates[:min(10, available_slots)]
+        
+        # Log 當日訊號數量
+        if len(breakout_candidates) > 10:
+            logger.debug(f"{date.strftime('%Y-%m-%d')}: {len(breakout_candidates)} 個突破訊號，選擇 Top-{len(top_candidates)}")
+        
+        # === 階段 3: 執行買入 ===
+        available_cash = self.cash
+        position_size = available_cash * self.max_position_pct
+        
+        for candidate in top_candidates:
+            if available_cash < position_size:
+                break
+            
+            symbol = candidate['symbol']
+            buy_price = candidate['buy_price']
+            
+            shares = int(position_size / buy_price)
+            
+            if shares > 0:
+                trade = Trade(
+                    symbol=symbol,
+                    buy_date=date,
+                    buy_price=buy_price,
+                    shares=shares
+                )
+                self.positions[symbol] = trade
+                buy_cost = buy_price * shares * (1 + self.trading_fee)
+                self.cash -= buy_cost
+                available_cash -= buy_cost
+                
+                if len(self.positions) >= self.max_positions:
+                    break
     
     def _close_all_positions(self, date: datetime, all_data: Dict):
         """結算所有未平倉部位"""
