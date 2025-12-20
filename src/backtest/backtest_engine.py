@@ -395,26 +395,41 @@ class BacktestEngine:
                         logger.debug(f"無法計算 {symbol} 信心分數: {e}")
                         confidence = 0.5
                 
+                # 計算成交金額 (Turnover) 作為市值/流動性代理
+                # Turnover = Price * Volume
+                # 這能解決高價股成交張數少的問題，反映真實資金流動
+                volume = df.loc[date, 'Volume'] if 'Volume' in df.columns else 0
+                turnover = buy_price * volume
+                
                 breakout_candidates.append({
                     'symbol': symbol,
                     'buy_price': buy_price,
                     'confidence': confidence,
+                    'turnover': turnover,
                     'df': df
                 })
         
-        # === 階段 2: 依信心分數排序，選 Top-10 ===
+        # === 階段 2: 排序選 Top-10 ===
         if not breakout_candidates:
             return
         
-        # 排序: 信心分數由高到低
-        breakout_candidates.sort(key=lambda x: x['confidence'], reverse=True)
+        # 加入隨機擾動以避免字母排序偏差 (當信心與成交額都相同時)
+        np.random.shuffle(breakout_candidates)
+        
+        # 排序優先級: 
+        # 1. 信心分數 (由高到低)
+        # 2. 成交金額 (由高到低) - 優先選流動性高/大型股
+        breakout_candidates.sort(
+            key=lambda x: (x['confidence'], x['turnover']), 
+            reverse=True
+        )
         
         # 限制為 Top-10 (或可用空位數)
         top_candidates = breakout_candidates[:min(10, available_slots)]
         
         # Log 當日訊號數量
         if len(breakout_candidates) > 10:
-            logger.debug(f"{date.strftime('%Y-%m-%d')}: {len(breakout_candidates)} 個突破訊號，選擇 Top-{len(top_candidates)}")
+            logger.debug(f"{date.strftime('%Y-%m-%d')}: {len(breakout_candidates)} 個訊號，Top-10 cutoff 信心: {top_candidates[-1]['confidence']:.4f}")
         
         # === 階段 3: 執行買入 ===
         available_cash = self.cash
