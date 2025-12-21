@@ -72,3 +72,17 @@ htmlcov/
 
 # 保留結構用的 .gitkeep
 !.gitkeep
+
+# v3 Large Folders
+logs_v*/
+models_v*/
+outputs/evaluation/
+data/processed/*.pkl
+
+# Exclude all generated content
+logs/
+models/
+outputs/
+
+
+

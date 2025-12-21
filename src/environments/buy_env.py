@@ -64,27 +64,73 @@ class BuyEnv(gym.Env):
         self.success_threshold = config.get('success_threshold', 0.10)
         self.balance_data = config.get('balance_data', True)
         
-        # 處理標籤: 如果有 'label' 欄位，轉換為 'is_successful'
-        # Label 2 = 成功 (報酬 >= 10%), Label 1 = 失敗
-        if 'label' in signals_data.columns and 'is_successful' not in signals_data.columns:
-            signals_data = signals_data.copy()
-            signals_data['is_successful'] = signals_data['label'] == 2
+        # Shared Memory 支援
+        self.use_shared_memory = config.get('use_shared_memory', False)
         
-        # 特徵欄位 (排除 actual_return 和 is_successful)
-        self.feature_cols = [col for col in signals_data.columns 
-                             if col not in ['actual_return', 'is_successful', 'Date', 'symbol', 'label']]
-        
-        # 儲存原始資料
-        self._original_data = signals_data.copy()
-        
-        # 資料平衡 (1:1)
-        if self.balance_data:
-            self.data = self._balance_data(signals_data)
+        if self.use_shared_memory:
+            from multiprocessing.shared_memory import SharedMemory
+            self.shm_name = config.get('shm_name')
+            self.shm_shape = config.get('shm_shape')
+            self.shm_dtype = config.get('shm_dtype')
+            self.feature_idx_map = config.get('feature_idx_map', {})
+            
+            # 連接現有的 Shared Memory
+            self.existing_shm = SharedMemory(name=self.shm_name)
+            # 建立 Numpy array (不複製數據，直接用 buffer)
+            self.data_np = np.ndarray(self.shm_shape, dtype=self.shm_dtype, buffer=self.existing_shm.buf)
+            # 為了相容性，self.data 設為 None 或包裝過的物件 (這裡主要依賴 self.data_np)
+            self.data = pd.DataFrame(self.data_np, columns=list(self.feature_idx_map.keys())) # 視情況可能不需要這行，若 _get_obs 改寫的話
+            
+            # 為了資料平衡，我們需要在 train_multicore.py 就先平衡好，這裡只負責讀取
+            # 這裡假設傳入 Shared Memory 的資料已經是平衡好的
+            logger.info(f"BuyEnv (Shared Memory) 初始化完成 - {len(self.data_np)} 個訓練樣本")
+            
+            # 定義 feature_cols (排除非特徵欄位)
+            # 注意: map keys 可能包含 Date, symbol 等
+            exclude_cols = ['actual_return', 'is_successful', 'Date', 'symbol', 'label', 'symbol_idx']
+            
+            # 優先使用 DataNormalizer 定義的標準 69 特徵 (如果可用)
+            # 這能解決與 Paper Agent Checkpoint (69 features) 的兼容性問題
+            try:
+                from src.data.normalizer import DataNormalizer
+                standard_features = DataNormalizer().get_normalized_feature_columns()
+                # 只保留存在於 shm 中的標準特徵
+                self.feature_cols = [col for col in standard_features if col in self.feature_idx_map]
+                logger.info(f"Using Standard 69 Features Mode ({len(self.feature_cols)} found)")
+            except ImportError:
+                # Fallback 到排除法
+                self.feature_cols = [col for col in self.feature_idx_map.keys() if col not in exclude_cols]
+                logger.warning(f"DataNormalizer not found, using exclusion mode ({len(self.feature_cols)} features)")
+
+            logger.info(f"BuyEnv Features ({len(self.feature_cols)}): {self.feature_cols[:5]}...")
+            
+            # 設定特徵欄位索引 (加速讀取)
+            self.feature_indices = [self.feature_idx_map[col] for col in self.feature_cols]
+            
         else:
-            self.data = signals_data.copy()
-        
+            # 傳統模式 (Pandas Copy)
+            # 處理標籤: 如果有 'label' 欄位，轉換為 'is_successful'
+            if 'label' in signals_data.columns and 'is_successful' not in signals_data.columns:
+                signals_data = signals_data.copy()
+                signals_data['is_successful'] = signals_data['label'] == 2
+            
+            # 特徵欄位 (排除 actual_return 和 is_successful)
+            self.feature_cols = [col for col in signals_data.columns 
+                                 if col not in ['actual_return', 'is_successful', 'Date', 'symbol', 'label']]
+            
+            # 儲存原始資料
+            self._original_data = signals_data.copy()
+            
+            # 資料平衡 (1:1)
+            if self.balance_data:
+                self.data = self._balance_data(signals_data)
+            else:
+                self.data = signals_data.copy()
+            
+            logger.info(f"BuyEnv (Standard) 初始化完成 - {len(self.data)} 個訓練樣本, {len(self.feature_cols)} 維特徵")
+            
         # 定義狀態空間 (69 維)
-        n_features = len(self.feature_cols)
+        n_features = len(self.feature_cols) if not self.use_shared_memory else len(self.feature_indices)
         self.observation_space = spaces.Box(
             low=-np.inf, 
             high=np.inf, 
@@ -99,7 +145,14 @@ class BuyEnv(gym.Env):
         self.current_idx = 0
         self.current_obs = None
         
-        logger.info(f"BuyEnv 初始化完成 - {len(self.data)} 個訓練樣本, {n_features} 維特徵")
+        # 索引管理 (用於 Shuffle)
+        if self.use_shared_memory:
+            self.data_len = len(self.data_np)
+        else:
+            self.data_len = len(self.data)
+            
+        self.row_indices = np.arange(self.data_len, dtype=np.int32)
+
     
     def _balance_data(self, data: pd.DataFrame) -> pd.DataFrame:
         """
@@ -135,23 +188,26 @@ class BuyEnv(gym.Env):
               options: Optional[dict] = None) -> Tuple[np.ndarray, dict]:
         """
         重置環境
-        
-        Returns:
-            observation: 初始狀態 (69 維)
-            info: 額外資訊
         """
         super().reset(seed=seed)
         
-        # 打亂資料順序
-        self.data = self.data.sample(frac=1).reset_index(drop=True)
+        # 設定隨機種子 (如果有的話)
+        if seed is not None:
+            np.random.seed(seed)
+        
+        # 打亂索引順序 (無論是 Shared Memory 還是 Pandas 模式)
+        # 這確保了每個 Episode 看到的數據順序是隨機的
+        np.random.shuffle(self.row_indices)
+        
         self.current_idx = 0
         
-        # 取得第一個觀察
-        self.current_obs = self._get_observation(self.current_idx)
+        # 取得第一個觀察 (使用映射後的真實索引)
+        real_idx = self.row_indices[self.current_idx]
+        self.current_obs = self._get_observation(real_idx)
         
         info = {
-            'sample_idx': self.current_idx,
-            'total_samples': len(self.data)
+            'sample_idx': int(real_idx),
+            'total_samples': self.data_len
         }
         
         return self.current_obs, info
@@ -159,40 +215,46 @@ class BuyEnv(gym.Env):
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, dict]:
         """
         執行動作
-        
-        Args:
-            action: 0 (不買) 或 1 (買)
-            
-        Returns:
-            observation: 下一個狀態
-            reward: 獎勵值
-            terminated: 是否結束 (單步結束)
-            truncated: 是否截斷
-            info: 額外資訊
         """
-        # 取得當前樣本的實際結果
-        current_sample = self.data.iloc[self.current_idx]
-        is_successful = current_sample.get('is_successful', False)
-        actual_return = current_sample.get('actual_return', 0.0)
+        # 取得當前真實索引
+        real_idx = self.row_indices[self.current_idx]
+
+        if self.use_shared_memory:
+            # Shared Memory 模式
+            current_row = self.data_np[real_idx]
+            
+            is_successful_idx = self.feature_idx_map.get('is_successful')
+            actual_return_idx = self.feature_idx_map.get('actual_return')
+            
+            is_successful = bool(current_row[is_successful_idx]) if is_successful_idx is not None else False
+            actual_return = float(current_row[actual_return_idx]) if actual_return_idx is not None else 0.0
+            
+        else:
+            # 傳統模式 (Pandas) - 如果是 Pandas 模式，reset 雖然 shuffle 了 indices，
+            # 但 self.data 沒有被 shuffle (我們改用 indices access)
+            # 所以這裡也要用 indices
+            # 注意：原來的 reset 邏輯是 shuffle self.data。現在我們統一用 indices。
+            current_sample = self.data.iloc[real_idx]
+            is_successful = current_sample.get('is_successful', False)
+            actual_return = current_sample.get('actual_return', 0.0)
         
         # 計算獎勵
-        # action=1 表示「預測會獲利」，如果實際成功則正確
-        # action=0 表示「預測會虧損」，如果實際失敗則正確
         if action == 1:
-            reward = 1.0 if is_successful else -1.0
+            reward = 1.0 if is_successful else 0.0
         else:
-            reward = 1.0 if not is_successful else -1.0
+            reward = 1.0 if not is_successful else 0.0
         
         # 移動到下一個樣本
         self.current_idx += 1
         
         # 檢查是否結束
-        terminated = self.current_idx >= len(self.data)
+        terminated = self.current_idx >= self.data_len
         truncated = False
         
         # 取得下一個觀察
         if not terminated:
-            self.current_obs = self._get_observation(self.current_idx)
+            next_real_idx = self.row_indices[self.current_idx]
+            self.current_obs = self._get_observation(next_real_idx)
         
         info = {
             'action': action,
@@ -205,11 +267,22 @@ class BuyEnv(gym.Env):
     
     def _get_observation(self, idx: int) -> np.ndarray:
         """取得指定索引的觀察向量"""
-        if idx >= len(self.data):
-            return np.zeros(len(self.feature_cols), dtype=np.float32)
+        total_len = len(self.data_np) if self.use_shared_memory else len(self.data)
         
-        sample = self.data.iloc[idx]
-        obs = sample[self.feature_cols].values.astype(np.float32)
+        if idx >= total_len:
+            # 回傳零向量
+            dim = len(self.feature_indices) if self.use_shared_memory else len(self.feature_cols)
+            return np.zeros(dim, dtype=np.float32)
+        
+        if self.use_shared_memory:
+            # Numpy 模式: 直接使用預先計算好的 indices 切片
+            # 這裡假設 self.data_np 包含了所有欄位，我們只取特徵欄位
+            # 使用 fancy indexing (注意: 這會產生 copy，但對於 69 維 float32 來說非常快)
+            obs = self.data_np[idx, self.feature_indices].astype(np.float32)
+        else:
+            # Pandas 模式
+            sample = self.data.iloc[idx]
+            obs = sample[self.feature_cols].values.astype(np.float32)
         
         # 處理 NaN 和 Inf
         obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=-1.0)

@@ -322,10 +322,40 @@ class BacktestEngine:
                     continue
             
             # 2. 使用 Sell Agent 決策
-            if self.sell_agent:
-                # 簡化: 這裡應該計算特徵並正規化
-                # 目前使用簡化邏輯
-                should_sell = holding_days > 60 and np.random.random() > 0.8
+            if self.sell_agent and self.sell_agent.model is not None:
+                should_sell = False
+                
+                try:
+                    # 計算 69 維基本特徵
+                    features_69 = self._calculate_stock_features(symbol, df, None, date)
+                    
+                    if features_69 is not None:
+                        # 計算 SellReturn (公式 20: Open_t / BuyPrice)
+                        current_open = df.loc[date, 'Open'] if 'Open' in df.columns else current_price
+                        sell_return = current_open / trade.buy_price
+                        
+                        # 建構 70 維特徵向量
+                        obs_70 = np.concatenate([features_69, [sell_return]]).astype(np.float32)
+                        
+                        # 使用模型預測
+                        if hasattr(self.sell_agent, 'predict_proba'):
+                            # 取得動作機率 [hold_prob, sell_prob]
+                            probs = self.sell_agent.predict_proba(obs_70)
+                            hold_prob, sell_prob = float(probs[0]), float(probs[1])
+                            
+                            # 論文條件: |sell_prob - hold_prob| > 0.85 且 sell_prob > hold_prob
+                            confidence_diff = sell_prob - hold_prob
+                            if confidence_diff > 0.85:
+                                should_sell = True
+                                logger.debug(f"{date.strftime('%Y-%m-%d')} {symbol}: Sell Agent 決定賣出 (conf: {confidence_diff:.2f})")
+                        else:
+                            # Fallback: 直接使用 predict
+                            action, _ = self.sell_agent.model.predict(obs_70.reshape(1, -1), deterministic=True)
+                            should_sell = (action[0] == 1)
+                            
+                except Exception as e:
+                    logger.debug(f"Sell Agent 預測 {symbol} 失敗: {e}")
+                    should_sell = False
                 
                 if should_sell:
                     trade.sell_date = date
@@ -395,17 +425,12 @@ class BacktestEngine:
                         logger.debug(f"無法計算 {symbol} 信心分數: {e}")
                         confidence = 0.5
                 
-                # 計算成交金額 (Turnover) 作為市值/流動性代理
-                # Turnover = Price * Volume
-                # 這能解決高價股成交張數少的問題，反映真實資金流動
-                volume = df.loc[date, 'Volume'] if 'Volume' in df.columns else 0
-                turnover = buy_price * volume
+                # V3: 移除成交額排序 (Volume 已移除，對齊論文)
                 
                 breakout_candidates.append({
                     'symbol': symbol,
                     'buy_price': buy_price,
                     'confidence': confidence,
-                    'turnover': turnover,
                     'df': df
                 })
         
@@ -413,14 +438,12 @@ class BacktestEngine:
         if not breakout_candidates:
             return
         
-        # 加入隨機擾動以避免字母排序偏差 (當信心與成交額都相同時)
+        # 加入隨機擾動以避免字母排序偏差 (當信心相同時)
         np.random.shuffle(breakout_candidates)
         
-        # 排序優先級: 
-        # 1. 信心分數 (由高到低)
-        # 2. 成交金額 (由高到低) - 優先選流動性高/大型股
+        # V3: 僅依信心分數排序 (移除成交額次要排序)
         breakout_candidates.sort(
-            key=lambda x: (x['confidence'], x['turnover']), 
+            key=lambda x: x['confidence'], 
             reverse=True
         )
         

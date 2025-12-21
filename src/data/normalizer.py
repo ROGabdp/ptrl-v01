@@ -65,7 +65,7 @@ class DataNormalizer:
     NO_NORMALIZE_COLS = [
         'SuperTrend_14', 'SuperTrend_21',  # 已經是 1/-1
         'Return', 'Index_Return',           # 報酬率已經是小數
-        'Up_Stock', 'Down_Stock',           # 將在後續計算
+        'Up_Stock', 'Down_Stock',           # 市場廣度 (已是 0~1 比例)
         'RS_Rate_5', 'RS_Rate_10', 'RS_Rate_20', 'RS_Rate_40',  # 已經是 0-100
         'RS_Momentum', 'RS_Trend'           # 已經是比率
     ]
@@ -105,10 +105,11 @@ class DataNormalizer:
         # 5. 正規化 Open 和 HA_Open (額外)
         result = self.normalize_open_prices(result)
         
-        # 6. 正規化 Volume (論文排除，但我們用 log 處理)
-        result = self.normalize_volume(result)
+        # 6. Volume 正規化 - V3 移除 (對齊論文)
+        # 論文明確排除 Volume 特徵
+        # result = self.normalize_volume(result)
         
-        logger.info("正規化完成")
+        logger.info("正規化完成 (Volume 已排除)")
         return result
     
     def normalize_price_ratios(self, df: pd.DataFrame) -> pd.DataFrame:

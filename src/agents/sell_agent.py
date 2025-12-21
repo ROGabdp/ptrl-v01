@@ -111,7 +111,8 @@ class SellAgent:
             resume: 是否從最新檢查點恢復訓練
         """
         # 包裝環境
-        if not isinstance(env, DummyVecEnv):
+        # 包裝環境
+        if not isinstance(env, VecEnv):
             env = DummyVecEnv([lambda: Monitor(env)])
         
         resumed_steps = 0

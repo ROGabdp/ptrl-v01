@@ -58,7 +58,7 @@ buy_agent:
       vf: [69, 40]  # Critic
   
   # 訓練設定
-  total_timesteps: 18000000   # 延長至 18M 觀察是否飽和
+  total_timesteps: 15000000   # V3: 統一為 15M steps
   checkpoint_freq: 10000
   eval_freq: 5000
   n_eval_episodes: 10

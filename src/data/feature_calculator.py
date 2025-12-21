@@ -290,10 +290,13 @@ class FeatureCalculator:
         if 'RS_AVG' in result.columns:
             result['RS_Trend'] = result['RS_AVG'] / result['RS_AVG'].shift(21)
         
-        # 10. Up_Stock / Down_Stock - 需要多股票資料  [2 個]
-        # 這些欄位會在 StrategyOrchestrator 中根據全市場資料計算
-        result['Up_Stock'] = np.nan
-        result['Down_Stock'] = np.nan
+        # 10. Up_Stock / Down_Stock - 市場廣度指標  [2 個]
+        # 這些欄位需要從 MarketBreadthCalculator 的輸出合併
+        # 若已有 breadth 資料會由外部 merge，此處設為 NaN 作為預留
+        if 'Up_Stock' not in result.columns:
+            result['Up_Stock'] = np.nan
+        if 'Down_Stock' not in result.columns:
+            result['Down_Stock'] = np.nan
         
         logger.debug("相對強度變數計算完成 (26 個)")
         return result

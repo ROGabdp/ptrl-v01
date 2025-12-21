@@ -74,16 +74,48 @@ class SellEnv(gym.Env):
         self.success_threshold = config.get('success_threshold', 0.10)
         self.sell_threshold = config.get('sell_threshold', 0.85)
         
-        # 將交易資料轉換為訓練用序列
-        self.episodes = self._prepare_episodes(trade_data)
+        # Shared Memory 支援
+        self.use_shared_memory = config.get('use_shared_memory', False)
         
-        # 取得特徵欄位名稱
-        if self.episodes:
-            first_episode = self.episodes[0]
-            self.feature_cols = [col for col in first_episode['features'].columns 
-                                if col not in ['Date', 'Close', 'Open', 'High', 'Low', 'Volume']]
+        if self.use_shared_memory:
+            from multiprocessing.shared_memory import SharedMemory
+            self.shm_name = config.get('shm_name')
+            self.shm_shape = config.get('shm_shape')
+            self.shm_dtype = config.get('shm_dtype')
+            self.feature_idx_map = config.get('feature_idx_map', {})
+            
+            # 連接現有的 Shared Memory
+            self.existing_shm = SharedMemory(name=self.shm_name)
+            self.data_np = np.ndarray(self.shm_shape, dtype=self.shm_dtype, buffer=self.existing_shm.buf)
+            
+            # 特徵欄位
+            # 在 Pandas 模式下是從 DataFrame 動態取得，但在 Shared Memory 模式下，我們依賴 feature_idx_map
+            # 排除非特徵欄位和特殊欄位 (Date, OHLCV, actual_return, is_successful)
+            self.feature_cols = [col for col in self.feature_idx_map.keys() 
+                                 if col not in ['Date', 'Close', 'Open', 'High', 'Low', 'Volume', 'actual_return', 'is_successful', 'label']]
+            # 確保順序一致
+            self.feature_indices = [self.feature_idx_map[col] for col in self.feature_cols]
+            
+            # 準備 episodes (基於索引)
+            # trade_data 在 Shared Memory 模式下是一個包含 episode metadata 的列表
+            # [{'start_idx': 100, 'end_idx': 220, 'buy_price': 50.0}, ...]
+            self.episodes = trade_data 
+            logger.info(f"SellEnv (Shared Memory) 初始化完成 - {len(self.episodes)} 個 episodes")
+            
         else:
-            self.feature_cols = []
+            # 傳統模式 (Pandas Copy)
+            # 將交易資料轉換為訓練用序列
+            self.episodes = self._prepare_episodes(trade_data)
+            
+            # 取得特徵欄位名稱
+            if self.episodes:
+                first_episode = self.episodes[0]
+                self.feature_cols = [col for col in first_episode['features'].columns 
+                                    if col not in ['Date', 'Close', 'Open', 'High', 'Low', 'Volume']]
+            else:
+                self.feature_cols = []
+            
+            logger.info(f"SellEnv (Standard) 初始化完成 - {len(self.episodes)} 個 episodes")
         
         # 定義狀態空間 (70 維 = 69 特徵 + SellReturn)
         n_features = len(self.feature_cols) + 1  # +1 for SellReturn
@@ -100,15 +132,17 @@ class SellEnv(gym.Env):
         # 內部狀態
         self.current_episode_idx = 0
         self.current_episode = None
+        # Shared Memory 模式下的內部指標
+        self.current_episode_start_idx = 0
+        self.current_episode_len = 0
+        
         self.current_day = 0
         self.buy_price = 0.0
         self.holding_days = 0
-        
-        logger.info(f"SellEnv 初始化完成 - {len(self.episodes)} 個 episodes, {n_features} 維特徵")
     
     def _prepare_episodes(self, trade_data: Dict) -> List[Dict]:
         """
-        準備訓練用 episodes
+        準備訓練用 episodes (Pandas 模式)
         
         每個 episode 代表一筆交易 (從買入到賣出)
         只使用最終達到 ≥10% 報酬的交易
@@ -159,17 +193,34 @@ class SellEnv(gym.Env):
         
         # 重置狀態
         self.current_day = 0
-        self.buy_price = self.current_episode['buy_price']
         self.holding_days = 0
         
-        # 取得初始觀察
-        obs = self._get_observation()
-        
-        info = {
-            'episode_idx': self.current_episode_idx,
-            'buy_price': self.buy_price,
-            'max_return': self.current_episode['max_return']
-        }
+        if self.use_shared_memory:
+            # Shared Memory 模式
+            # current_episode 是一個 dict: {'start_idx': ..., 'end_idx': ..., 'buy_price': ...}
+            self.current_episode_start_idx = self.current_episode['start_idx']
+            self.current_episode_len = self.current_episode['end_idx'] - self.current_episode['start_idx']
+            self.buy_price = self.current_episode['buy_price']
+            
+            obs = self._get_observation()
+            
+            info = {
+                'episode_idx': self.current_episode_idx,
+                'buy_price': self.buy_price,
+                'max_return': self.current_episode.get('max_return', 0.0)
+            }
+        else:
+            # Pandas 模式
+            # current_episode 是一個 dict: {'features': DataFrame, ...}
+            self.buy_price = self.current_episode['buy_price']
+            
+            obs = self._get_observation()
+            
+            info = {
+                'episode_idx': self.current_episode_idx,
+                'buy_price': self.buy_price,
+                'max_return': self.current_episode['max_return']
+            }
         
         return obs, info
     
@@ -180,13 +231,31 @@ class SellEnv(gym.Env):
         Args:
             action: 0 (持有) 或 1 (賣出)
         """
-        features = self.current_episode['features']
-        
         # 取得當前價格
-        if self.current_day < len(features):
-            current_close = features.iloc[self.current_day]['Close']
+        if self.use_shared_memory:
+            # Shared Memory 模式
+            # 必須使用 feature_idx_map 來找到 'Close' 的索引
+            close_idx = self.feature_idx_map.get('Close')
+            if close_idx is None: raise ValueError("Shared Memory 中缺少 'Close' 欄位")
+            
+            # 安全地讀取 Close 價格
+            # 若 current_day 超出範圍 (例如最後一天)，取最後一天的價格
+            day_idx = min(self.current_day, self.current_episode_len - 1)
+            global_idx = self.current_episode_start_idx + day_idx
+            
+            current_close = float(self.data_np[global_idx, close_idx])
+            
+            # 用於計算獎勵，這裡先用 current_return
+            # 為了計算論文獎勵，我們需要傳入一些額外資訊給 _calculate_reward_paper
+            # 這裡我們簡化：修改 _calculate_reward_paper 讓它能接受 current_return 和 features (若有)
+            
         else:
-            current_close = features.iloc[-1]['Close']
+            # Pandas 模式
+            features = self.current_episode['features']
+            if self.current_day < len(features):
+                current_close = features.iloc[self.current_day]['Close']
+            else:
+                current_close = features.iloc[-1]['Close']
         
         # 計算當前報酬率
         current_return = (current_close - self.buy_price) / self.buy_price
@@ -203,7 +272,12 @@ class SellEnv(gym.Env):
         truncated = False
         
         # 計算獎勵 (論文 4 情境邏輯)
-        reward = self._calculate_reward_paper(action, current_return, features)
+        # 注意: 我們需要傳遞 features 資訊給 _calculate_reward_paper
+        # 對於 Shared Memory 模式，我們可能需要調整該方法
+        if self.use_shared_memory:
+            reward = self._calculate_reward_paper_shm(action, current_return, self.current_episode, self.current_day)
+        else:
+            reward = self._calculate_reward_paper(action, current_return, self.current_episode['features'])
         
         # 移動到下一天
         self.current_day += 1
@@ -223,21 +297,48 @@ class SellEnv(gym.Env):
     
     def _get_observation(self) -> np.ndarray:
         """取得當前觀察 (70 維)"""
-        features = self.current_episode['features']
-        
-        if self.current_day >= len(features):
-            return np.zeros(len(self.feature_cols) + 1, dtype=np.float32)
-        
-        # 取得 69 個特徵
-        row = features.iloc[self.current_day]
-        feature_values = row[self.feature_cols].values.astype(np.float32)
-        
-        # 計算 SellReturn (公式 20)
-        current_open = row.get('Open', row.get('Close', self.buy_price))
-        sell_return = current_open / self.buy_price
-        
-        # 合併為 70 維
-        obs = np.concatenate([feature_values, [sell_return]])
+        if self.use_shared_memory:
+            # Shared Memory 模式
+            if self.current_day >= self.current_episode_len:
+                return np.zeros(len(self.feature_cols) + 1, dtype=np.float32)
+            
+            # 從 data_np 讀取特徵
+            global_idx = self.current_episode_start_idx + self.current_day
+            feature_values = self.data_np[global_idx, self.feature_indices].astype(np.float32)
+            
+            # 計算 SellReturn
+            # 取 Open 或 Close，若無 Open 則用 Close
+            open_idx = self.feature_idx_map.get('Open')
+            close_idx = self.feature_idx_map.get('Close')
+            
+            current_price = self.buy_price # Fallback
+            if open_idx is not None:
+                current_price = self.data_np[global_idx, open_idx]
+            elif close_idx is not None:
+                current_price = self.data_np[global_idx, close_idx]
+                
+            sell_return = current_price / self.buy_price
+            
+            # 合併為 70 維
+            obs = np.concatenate([feature_values, [sell_return]])
+            
+        else:
+            # Pandas 模式
+            features = self.current_episode['features']
+            
+            if self.current_day >= len(features):
+                return np.zeros(len(self.feature_cols) + 1, dtype=np.float32)
+            
+            # 取得 69 個特徵
+            row = features.iloc[self.current_day]
+            feature_values = row[self.feature_cols].values.astype(np.float32)
+            
+            # 計算 SellReturn (公式 20)
+            current_open = row.get('Open', row.get('Close', self.buy_price))
+            sell_return = current_open / self.buy_price
+            
+            # 合併為 70 維
+            obs = np.concatenate([feature_values, [sell_return]])
         
         # 處理 NaN
         obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=-1.0)
@@ -297,6 +398,76 @@ class SellEnv(gym.Env):
         reward = rank + 1.0
         
         return float(reward)
+    
+    def _calculate_reward_paper_shm(self, action: int, current_return: float, episode_info: Dict, current_day: int) -> float:
+        """
+        計算論文定義的獎勵 (Shared Memory 版本)
+        
+        Args:
+            action: 動作
+            current_return: 當前報酬率
+            episode_info: episode 資訊 (包含 start_idx, end_idx)
+            current_day: 當前天數 (相對 index)
+        """
+        # 1. 如果是持有 (Action 0)
+        if action == 0:
+            return -1.0 if current_return > 0.10 else 0.5
+        
+        # 2. 如果是賣出 (Action 1)
+        # 需要計算排名獎勵
+        
+        # 取得 episode 期間的所有價格
+        # 我們不能直接拿整個 DataFrame，因為是在 Shared Memory
+        # 但我們可以利用 start_idx 和 end_idx 來切片
+        start_idx = episode_info['start_idx']
+        episode_len = episode_info['end_idx'] - start_idx
+        
+        # 我們需要 Close 價格序列
+        close_idx = self.feature_idx_map.get('Close')
+        if close_idx is None: return 0.0 # Should not happen
+        
+        # 取得整個 episode 的 Close 價格序列 (這是一個 copy，雖然有點開銷但比 Pandas 快)
+        # 注意: 只取到 max_holding_days (如果 episode 更長)
+        actual_len = min(episode_len, self.max_holding_days)
+        prices = self.data_np[start_idx : start_idx + actual_len, close_idx]
+        
+        # 計算每天的報酬率
+        returns = (prices - self.buy_price) / self.buy_price
+        
+        # 排序報酬率 (由大到小)
+        sorted_returns = np.sort(returns)[::-1]
+        
+        # 找出當前報酬率的排名 (0-based)
+        # 處理浮點數精確度問題，使用 isclose 或差值
+        # 這裡簡化: 找出最接近的值的 index
+        # diff = np.abs(sorted_returns - current_return)
+        # rank = np.argmin(diff) 
+        
+        # 或者更嚴謹: 有多少個報酬率大於當前報酬率
+        rank = np.sum(sorted_returns > current_return)
+        
+        # 計算排名比例 (前幾%)
+        rank_pct = rank / len(sorted_returns)
+        
+        # 根據排名給予獎勵 (公式 21)
+        # 論文: Top 10% -> 2, Top 25% -> 1, Bottom 25% -> -1
+        # 但論文實際上是說: R_sell = 2 (if rank in top 1/8), 1 (if rank in top 1/4) ...
+        # 這裡沿用 _calculate_ranking_reward 的邏輯 (該方法已實作論文邏輯)
+        # 但我們需要將邏輯搬過來或呼叫它 (如果它不依賴 DataFrame)
+        
+        # 公式 21 實作:
+        T = len(sorted_returns)
+        idx = rank + 1 # 1-based ranking
+        
+        if idx <= T/8:
+            return 2.0
+        elif idx <= T/4:
+            return 1.0
+        elif idx >= (7*T)/8:
+            return -1.0 # 論文可能有錯字，通常賣在最低點應該懲罰
+        else:
+            return 0.0 # 中間區域
+
 
     
     def get_state_dim(self) -> int:
